@@ -454,25 +454,40 @@ app.post('/markup', async (req, res) => {
   }
 });
 
-// Full screen layout - Huge Bitcoin symbol on left, price and chart on right
+// Full screen layout - Huge Bitcoin coin on left, price and chart on right
 function generateFullMarkup(price, change24h, historicalPrices) {
   const formattedPrice = formatPrice(price);
   const changeColor = change24h >= 0 ? '#16A34A' : '#DC2626';
   const changePrefix = change24h >= 0 ? '+' : '';
   const chart = generatePriceChart(historicalPrices, 450, 120);
 
+  // Bitcoin coin SVG
+  const bitcoinCoin = `
+    <svg width="320" height="320" viewBox="0 0 320 320" xmlns="http://www.w3.org/2000/svg">
+      <!-- Outer circle (coin edge) -->
+      <circle cx="160" cy="160" r="155" fill="none" stroke="black" stroke-width="10"/>
+
+      <!-- Inner circle (coin face) -->
+      <circle cx="160" cy="160" r="145" fill="white" stroke="black" stroke-width="3"/>
+
+      <!-- Bitcoin B symbol -->
+      <text x="160" y="220" font-family="Arial, sans-serif" font-size="180" font-weight="900" text-anchor="middle" fill="black">₿</text>
+
+      <!-- Decorative notches around edge -->
+      <circle cx="160" cy="10" r="4" fill="black"/>
+      <circle cx="160" cy="310" r="4" fill="black"/>
+      <circle cx="10" cy="160" r="4" fill="black"/>
+      <circle cx="310" cy="160" r="4" fill="black"/>
+    </svg>
+  `;
+
   return `
     <div class="view view--full">
       <div class="layout">
-        <div class="title_bar">
-          <div class="title">Bitcoin Price</div>
-        </div>
         <div class="markdown" style="display: flex; flex-direction: row; align-items: center; height: 100%; padding: 20px;">
-          <!-- Left: Huge Bitcoin Symbol -->
+          <!-- Left: Huge Bitcoin Coin -->
           <div style="flex: 0 0 35%; display: flex; align-items: center; justify-content: center;">
-            <div style="font-size: 280px; font-weight: 900; line-height: 1;">
-              ₿
-            </div>
+            ${bitcoinCoin}
           </div>
 
           <!-- Right: Price, Change, and Chart -->
