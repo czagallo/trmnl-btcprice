@@ -459,11 +459,11 @@ function generateFullMarkup(price, change24h, historicalPrices) {
   const formattedPrice = formatPrice(price);
   const changeColor = change24h >= 0 ? '#16A34A' : '#DC2626';
   const changePrefix = change24h >= 0 ? '+' : '';
-  const chart = generatePriceChart(historicalPrices, 450, 120);
+  const chart = generatePriceChart(historicalPrices, 400, 110);
 
-  // Bitcoin coin SVG
+  // Bitcoin coin SVG (smaller to fit screen)
   const bitcoinCoin = `
-    <svg width="320" height="320" viewBox="0 0 320 320" xmlns="http://www.w3.org/2000/svg">
+    <svg width="260" height="260" viewBox="0 0 320 320" xmlns="http://www.w3.org/2000/svg">
       <!-- Outer circle (coin edge) -->
       <circle cx="160" cy="160" r="155" fill="none" stroke="black" stroke-width="10"/>
 
@@ -484,22 +484,22 @@ function generateFullMarkup(price, change24h, historicalPrices) {
   return `
     <div class="view view--full">
       <div class="layout">
-        <div class="markdown" style="display: flex; flex-direction: row; align-items: center; height: 100%; padding: 20px;">
-          <!-- Left: Huge Bitcoin Coin -->
-          <div style="flex: 0 0 35%; display: flex; align-items: center; justify-content: center;">
+        <div class="markdown" style="display: flex; flex-direction: row; align-items: center; height: 100%; padding: 15px 10px;">
+          <!-- Left: Bitcoin Coin -->
+          <div style="flex: 0 0 30%; display: flex; align-items: center; justify-content: center; padding-left: 10px;">
             ${bitcoinCoin}
           </div>
 
           <!-- Right: Price, Change, and Chart -->
-          <div style="flex: 1; display: flex; flex-direction: column; justify-content: center; padding-left: 30px;">
-            <div style="font-size: 80px; font-weight: 700; margin-bottom: 10px;">
+          <div style="flex: 1; display: flex; flex-direction: column; justify-content: center; padding-left: 20px; padding-right: 15px; max-width: 65%;">
+            <div style="font-size: 68px; font-weight: 700; margin-bottom: 8px; line-height: 1;">
               $${formattedPrice}
             </div>
-            <div style="font-size: 32px; font-weight: 400; color: ${changeColor}; margin-bottom: 20px;">
+            <div style="font-size: 28px; font-weight: 400; color: ${changeColor}; margin-bottom: 18px;">
               ${changePrefix}${change24h.toFixed(2)}% (24h)
             </div>
             ${chart}
-            <div style="font-size: 18px; font-weight: 300; margin-top: 12px; opacity: 0.7;">
+            <div style="font-size: 16px; font-weight: 300; margin-top: 10px; opacity: 0.7;">
               30-Day Price Chart
             </div>
           </div>
