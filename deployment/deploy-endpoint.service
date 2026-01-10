@@ -6,9 +6,11 @@ After=network.target
 Type=simple
 User=antfarm
 Group=antfarm
-WorkingDirectory=/home/antfarm/deployments/trmnl-btcprice/deployment
-Environment="DEPLOY_TOKEN=your-secret-token-here"
-ExecStart=/usr/bin/node deploy-endpoint.js
+WorkingDirectory=/home/antfarm/deployments/trmnl-btcprice
+Environment="NODE_ENV=production"
+Environment="DEPLOY_TOKEN=4b521be5d34f0ccffce3a92811ddc17c4257849bfca13cd52309d0e0a2f561de"
+ExecStart=/usr/bin/node /home/antfarm/deployments/trmnl-btcprice/deployment/deploy-endpoint.js
+
 Restart=always
 RestartSec=10
 
