@@ -6,7 +6,8 @@ Display the current Bitcoin price on your TRMNL e-ink display.
 
 - ₿ Shows the current Bitcoin price in USD
 - 📈 Displays 24-hour price change (percentage)
-- 📊 Supports all TRMNL layouts (full, half-vertical, half-horizontal, quadrant)
+- 📊 30-day price chart showing daily trends
+- 📱 Supports all TRMNL layouts (full, half-vertical, half-horizontal, quadrant)
 - 🔄 Updates automatically with your TRMNL refresh schedule
 - ⚡ Fast price data from CoinGecko API
 - 💾 Smart caching to minimize API calls
@@ -14,9 +15,10 @@ Display the current Bitcoin price on your TRMNL e-ink display.
 ## What You'll See
 
 The plugin displays:
-- A large Bitcoin symbol (₿)
+- A huge Bitcoin symbol (₿) on the left side
 - Current price in USD (e.g., $45,678.90)
 - 24-hour price change with color coding (green for gains, red for losses)
+- 30-day price trend chart
 
 ## Installation
 

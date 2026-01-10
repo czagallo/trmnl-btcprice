@@ -78,13 +78,13 @@ function fetchBitcoinPrice() {
   });
 }
 
-// Fetch 24h historical Bitcoin prices from CoinGecko API
+// Fetch 30-day historical Bitcoin prices from CoinGecko API
 function fetchHistoricalPrices() {
   return new Promise((resolve, reject) => {
     const options = {
       hostname: 'api.coingecko.com',
       port: 443,
-      path: '/api/v3/coins/bitcoin/market_chart?vs_currency=usd&days=1&interval=daily',
+      path: '/api/v3/coins/bitcoin/market_chart?vs_currency=usd&days=30&interval=daily',
       method: 'GET',
       headers: {
         'Accept': 'application/json',
@@ -454,12 +454,12 @@ app.post('/markup', async (req, res) => {
   }
 });
 
-// Full screen layout - Huge Bitcoin symbol and price
+// Full screen layout - Huge Bitcoin symbol on left, price and chart on right
 function generateFullMarkup(price, change24h, historicalPrices) {
   const formattedPrice = formatPrice(price);
   const changeColor = change24h >= 0 ? '#16A34A' : '#DC2626';
   const changePrefix = change24h >= 0 ? '+' : '';
-  const chart = generatePriceChart(historicalPrices, 600, 100);
+  const chart = generatePriceChart(historicalPrices, 450, 120);
 
   return `
     <div class="view view--full">
@@ -467,19 +467,26 @@ function generateFullMarkup(price, change24h, historicalPrices) {
         <div class="title_bar">
           <div class="title">Bitcoin Price</div>
         </div>
-        <div class="markdown" style="display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100%; text-align: center;">
-          <div style="font-size: 140px; font-weight: 700; line-height: 1; margin-bottom: 15px;">
-            ₿
+        <div class="markdown" style="display: flex; flex-direction: row; align-items: center; height: 100%; padding: 20px;">
+          <!-- Left: Huge Bitcoin Symbol -->
+          <div style="flex: 0 0 35%; display: flex; align-items: center; justify-content: center;">
+            <div style="font-size: 280px; font-weight: 900; line-height: 1;">
+              ₿
+            </div>
           </div>
-          <div style="font-size: 64px; font-weight: 700; margin-bottom: 8px;">
-            $${formattedPrice}
-          </div>
-          <div style="font-size: 24px; font-weight: 400; color: ${changeColor}; margin-bottom: 15px;">
-            ${changePrefix}${change24h.toFixed(2)}% (24h)
-          </div>
-          ${chart}
-          <div style="font-size: 16px; font-weight: 300; margin-top: 10px; opacity: 0.7;">
-            24h Price Chart
+
+          <!-- Right: Price, Change, and Chart -->
+          <div style="flex: 1; display: flex; flex-direction: column; justify-content: center; padding-left: 30px;">
+            <div style="font-size: 80px; font-weight: 700; margin-bottom: 10px;">
+              $${formattedPrice}
+            </div>
+            <div style="font-size: 32px; font-weight: 400; color: ${changeColor}; margin-bottom: 20px;">
+              ${changePrefix}${change24h.toFixed(2)}% (24h)
+            </div>
+            ${chart}
+            <div style="font-size: 18px; font-weight: 300; margin-top: 12px; opacity: 0.7;">
+              30-Day Price Chart
+            </div>
           </div>
         </div>
       </div>
