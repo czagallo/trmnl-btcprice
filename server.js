@@ -14,12 +14,8 @@ const BASE_URL = process.env.BASE_URL || `http://localhost:${PORT}`;
 const pluginConnections = new Map();
 
 // Cache for Bitcoin price (avoid hitting API too frequently)
-let priceCache = {
-  price: null,
-  change24h: null,
-  historicalPrices: null,
-  lastUpdated: null
-};
+// Store cache per interval (days)
+const priceCache = new Map();
 const CACHE_DURATION = 2 * 60 * 1000; // 2 minutes
 
 // Middleware
@@ -78,13 +74,16 @@ function fetchBitcoinPrice() {
   });
 }
 
-// Fetch 30-day historical Bitcoin prices from CoinGecko API
-function fetchHistoricalPrices() {
+// Fetch historical Bitcoin prices from CoinGecko API
+function fetchHistoricalPrices(days = 30) {
   return new Promise((resolve, reject) => {
+    // For 1 day, use hourly interval; otherwise use daily
+    const interval = days === 1 ? 'hourly' : 'daily';
+
     const options = {
       hostname: 'api.coingecko.com',
       port: 443,
-      path: '/api/v3/coins/bitcoin/market_chart?vs_currency=usd&days=30&interval=daily',
+      path: `/api/v3/coins/bitcoin/market_chart?vs_currency=usd&days=${days}&interval=${interval}`,
       method: 'GET',
       headers: {
         'Accept': 'application/json',
@@ -126,33 +125,37 @@ function fetchHistoricalPrices() {
 }
 
 // Get Bitcoin price with caching
-async function getBitcoinPrice() {
+async function getBitcoinPrice(days = 30) {
   const now = Date.now();
+  const cacheKey = `days_${days}`;
 
   // Return cached price if still valid
-  if (priceCache.price && priceCache.lastUpdated && (now - priceCache.lastUpdated) < CACHE_DURATION) {
-    console.log('Returning cached Bitcoin price');
+  const cached = priceCache.get(cacheKey);
+  if (cached && cached.lastUpdated && (now - cached.lastUpdated) < CACHE_DURATION) {
+    console.log(`Returning cached Bitcoin price (${days} days)`);
     return {
-      price: priceCache.price,
-      change24h: priceCache.change24h,
-      historicalPrices: priceCache.historicalPrices
+      price: cached.price,
+      change24h: cached.change24h,
+      historicalPrices: cached.historicalPrices
     };
   }
 
   // Fetch fresh price and historical data
   try {
-    console.log('Fetching fresh Bitcoin price and historical data...');
+    console.log(`Fetching fresh Bitcoin price and ${days}-day historical data...`);
     const [priceData, historicalPrices] = await Promise.all([
       fetchBitcoinPrice(),
-      fetchHistoricalPrices()
+      fetchHistoricalPrices(days)
     ]);
 
-    priceCache = {
+    const newCache = {
       price: priceData.price,
       change24h: priceData.change24h,
       historicalPrices: historicalPrices,
       lastUpdated: now
     };
+
+    priceCache.set(cacheKey, newCache);
     console.log(`Bitcoin price: $${priceData.price.toLocaleString()}`);
     console.log(`Historical data points: ${historicalPrices.length}`);
     return {
@@ -163,12 +166,12 @@ async function getBitcoinPrice() {
   } catch (error) {
     console.error('Error fetching Bitcoin price:', error);
     // Return cached price if available, even if stale
-    if (priceCache.price) {
+    if (cached) {
       console.log('Returning stale cached price due to error');
       return {
-        price: priceCache.price,
-        change24h: priceCache.change24h,
-        historicalPrices: priceCache.historicalPrices || []
+        price: cached.price,
+        change24h: cached.change24h,
+        historicalPrices: cached.historicalPrices || []
       };
     }
     // Return placeholder if no cache available
@@ -364,6 +367,8 @@ app.get('/manage', (req, res) => {
   }
 
   const connection = pluginConnections.get(uuid);
+  const currentInterval = connection?.chartInterval || '30';
+  const saved = req.query.saved === 'true';
 
   res.send(`
     <!DOCTYPE html>
@@ -385,7 +390,17 @@ app.get('/manage', (req, res) => {
           box-shadow: 0 2px 4px rgba(0,0,0,0.1);
         }
         h1 { color: #333; margin-top: 0; }
+        h2 { color: #333; margin-top: 30px; font-size: 20px; }
         p { color: #666; line-height: 1.6; }
+        label { display: block; margin-bottom: 8px; font-weight: 500; color: #333; }
+        select {
+          width: 100%;
+          padding: 10px;
+          border: 1px solid #ddd;
+          border-radius: 4px;
+          font-size: 16px;
+          margin-bottom: 15px;
+        }
         .btn {
           display: inline-block;
           padding: 12px 24px;
@@ -393,37 +408,90 @@ app.get('/manage', (req, res) => {
           color: white;
           text-decoration: none;
           border-radius: 6px;
-          margin-top: 20px;
+          border: none;
+          cursor: pointer;
+          font-size: 16px;
+          margin-right: 10px;
         }
         .btn:hover { background: #E28212; }
+        .btn-secondary {
+          background: #6B7280;
+        }
+        .btn-secondary:hover {
+          background: #4B5563;
+        }
         .info {
           background: #FFF4E6;
           padding: 15px;
           border-radius: 6px;
           margin: 20px 0;
         }
+        .success {
+          background: #D1FAE5;
+          color: #065F46;
+          padding: 12px;
+          border-radius: 6px;
+          margin-bottom: 20px;
+        }
+        .interval-desc {
+          font-size: 14px;
+          color: #666;
+          margin-top: 8px;
+        }
       </style>
     </head>
     <body>
       <div class="card">
         <h1>₿ Bitcoin Price Plugin</h1>
-        <p>Your plugin is active and displaying the current Bitcoin price on your TRMNL device.</p>
 
-        <div class="info">
-          <strong>About this plugin:</strong><br>
-          Displays real-time Bitcoin price in USD, updated every few minutes. Price data provided by CoinGecko API.
-        </div>
+        ${saved ? '<div class="success">✓ Settings saved successfully!</div>' : ''}
 
-        <p>This plugin doesn't require any configuration - it automatically shows the current Bitcoin price.</p>
+        <p>Configure your Bitcoin price display settings.</p>
 
-        ${connection && connection.plugin_setting_id ?
-          `<a href="https://usetrmnl.com/plugin_settings/${connection.plugin_setting_id}/edit?force_refresh=true" class="btn">← Back to TRMNL</a>` :
-          `<a href="https://usetrmnl.com" class="btn">← Back to TRMNL</a>`
-        }
+        <h2>Chart Settings</h2>
+        <form method="POST" action="/manage/save">
+          <input type="hidden" name="uuid" value="${uuid}">
+
+          <label for="interval">Price Chart Interval:</label>
+          <select name="interval" id="interval">
+            <option value="1" ${currentInterval === '1' ? 'selected' : ''}>24 Hours (Hourly)</option>
+            <option value="7" ${currentInterval === '7' ? 'selected' : ''}>7 Days (Daily)</option>
+            <option value="30" ${currentInterval === '30' ? 'selected' : ''}>30 Days (Daily)</option>
+            <option value="90" ${currentInterval === '90' ? 'selected' : ''}>90 Days (Daily)</option>
+            <option value="365" ${currentInterval === '365' ? 'selected' : ''}>1 Year (Daily)</option>
+          </select>
+          <div class="interval-desc">Choose the time range for the price chart displayed on your device.</div>
+
+          <div style="margin-top: 25px;">
+            <button type="submit" class="btn">Save Settings</button>
+            ${connection && connection.plugin_setting_id ?
+              `<a href="https://usetrmnl.com/plugin_settings/${connection.plugin_setting_id}/edit?force_refresh=true" class="btn btn-secondary">← Back to TRMNL</a>` :
+              `<a href="https://usetrmnl.com" class="btn btn-secondary">← Back to TRMNL</a>`
+            }
+          </div>
+        </form>
       </div>
     </body>
     </html>
   `);
+});
+
+// Save settings endpoint
+app.post('/manage/save', express.urlencoded({ extended: true }), (req, res) => {
+  const { uuid, interval } = req.body;
+
+  if (!uuid) {
+    return res.status(400).send('Missing uuid parameter');
+  }
+
+  const connection = pluginConnections.get(uuid);
+  if (connection) {
+    connection.chartInterval = interval;
+    pluginConnections.set(uuid, connection);
+  }
+
+  // Redirect back to manage page with success message
+  res.redirect(`/manage?uuid=${uuid}&saved=true`);
 });
 
 // ============================================================================
@@ -435,13 +503,20 @@ app.post('/markup', async (req, res) => {
   const { user_uuid } = req.body;
 
   try {
+    // Get user's chart interval preference (default to 30 days)
+    const connection = pluginConnections.get(user_uuid);
+    const days = parseInt(connection?.chartInterval || '30');
+
     // Get current Bitcoin price and historical data
-    const { price, change24h, historicalPrices } = await getBitcoinPrice();
+    const { price, change24h, historicalPrices } = await getBitcoinPrice(days);
+
+    // Get chart label based on interval
+    const chartLabel = getChartLabel(days);
 
     // Generate markup for all layouts
     const response = {
-      markup: generateFullMarkup(price, change24h, historicalPrices),
-      markup_half_vertical: generateHalfVerticalMarkup(price, change24h, historicalPrices),
+      markup: generateFullMarkup(price, change24h, historicalPrices, chartLabel),
+      markup_half_vertical: generateHalfVerticalMarkup(price, change24h, historicalPrices, chartLabel),
       markup_half_horizontal: generateHalfHorizontalMarkup(price, change24h),
       markup_quadrant: generateQuadrantMarkup(price),
       shared: ""
@@ -454,8 +529,18 @@ app.post('/markup', async (req, res) => {
   }
 });
 
+// Helper to get chart label based on interval
+function getChartLabel(days) {
+  if (days === 1) return '24-Hour Chart';
+  if (days === 7) return '7-Day Chart';
+  if (days === 30) return '30-Day Chart';
+  if (days === 90) return '90-Day Chart';
+  if (days === 365) return '1-Year Chart';
+  return `${days}-Day Chart`;
+}
+
 // Full screen layout - Huge Bitcoin coin on left, price and chart on right
-function generateFullMarkup(price, change24h, historicalPrices) {
+function generateFullMarkup(price, change24h, historicalPrices, chartLabel = '30-Day Chart') {
   const formattedPrice = formatPrice(price);
   const changeColor = change24h >= 0 ? '#16A34A' : '#DC2626';
   const changePrefix = change24h >= 0 ? '+' : '';
@@ -500,7 +585,7 @@ function generateFullMarkup(price, change24h, historicalPrices) {
             </div>
             ${chart}
             <div style="font-size: 16px; font-weight: 300; margin-top: 10px; opacity: 0.7;">
-              30-Day Price Chart
+              ${chartLabel}
             </div>
           </div>
         </div>
@@ -510,7 +595,7 @@ function generateFullMarkup(price, change24h, historicalPrices) {
 }
 
 // Half vertical layout
-function generateHalfVerticalMarkup(price, change24h, historicalPrices) {
+function generateHalfVerticalMarkup(price, change24h, historicalPrices, chartLabel = '30-Day Chart') {
   const formattedPrice = formatPrice(price);
   const changeColor = change24h >= 0 ? '#16A34A' : '#DC2626';
   const changePrefix = change24h >= 0 ? '+' : '';
