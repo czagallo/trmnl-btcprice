@@ -1,0 +1,16 @@
+[Unit]
+Description=TRMNL Bitcoin Price Deploy Endpoint
+After=network.target
+
+[Service]
+Type=simple
+User=antfarm
+Group=antfarm
+WorkingDirectory=/home/antfarm/deployments/trmnl-btcprice/deployment
+Environment="DEPLOY_TOKEN=your-secret-token-here"
+ExecStart=/usr/bin/node deploy-endpoint.js
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,30 @@
+[Unit]
+Description=TRMNL Bitcoin Price Plugin
+After=network.target
+
+[Service]
+Type=simple
+User=antfarm
+Group=antfarm
+WorkingDirectory=/home/antfarm/deployments/trmnl-btcprice
+Environment="NODE_ENV=production"
+EnvironmentFile=/home/antfarm/deployments/trmnl-btcprice/.env
+
+# Use kill_port script to ensure port 3002 is free
+ExecStartPre=/usr/local/bin/kill_port.sh 3002
+ExecStartPre=/bin/sleep 2
+
+# Start the application
+ExecStart=/usr/bin/node server.js
+
+# Kill on stop
+ExecStop=/usr/local/bin/kill_port.sh 3002
+
+KillMode=mixed
+SendSIGKILL=yes
+TimeoutStopSec=5
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
