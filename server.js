@@ -17,6 +17,7 @@ const pluginConnections = new Map();
 let priceCache = {
   price: null,
   change24h: null,
+  historicalPrices: null,
   lastUpdated: null
 };
 const CACHE_DURATION = 2 * 60 * 1000; // 2 minutes
@@ -38,7 +39,8 @@ function fetchBitcoinPrice() {
       path: '/api/v3/simple/price?ids=bitcoin&vs_currencies=usd&include_24hr_change=true',
       method: 'GET',
       headers: {
-        'Accept': 'application/json'
+        'Accept': 'application/json',
+        'User-Agent': 'TRMNL-Bitcoin-Price-Plugin/1.0'
       }
     };
 
@@ -58,9 +60,58 @@ function fetchBitcoinPrice() {
               change24h: response.bitcoin.usd_24h_change || 0
             });
           } else {
+            console.error('Invalid response from CoinGecko API');
             reject(new Error('Invalid response from CoinGecko API'));
           }
         } catch (error) {
+          console.error('Error parsing CoinGecko response:', error.message);
+          reject(error);
+        }
+      });
+    });
+
+    req.on('error', (error) => {
+      reject(error);
+    });
+
+    req.end();
+  });
+}
+
+// Fetch 24h historical Bitcoin prices from CoinGecko API
+function fetchHistoricalPrices() {
+  return new Promise((resolve, reject) => {
+    const options = {
+      hostname: 'api.coingecko.com',
+      port: 443,
+      path: '/api/v3/coins/bitcoin/market_chart?vs_currency=usd&days=1&interval=daily',
+      method: 'GET',
+      headers: {
+        'Accept': 'application/json',
+        'User-Agent': 'TRMNL-Bitcoin-Price-Plugin/1.0'
+      }
+    };
+
+    const req = https.request(options, (res) => {
+      let data = '';
+
+      res.on('data', (chunk) => {
+        data += chunk;
+      });
+
+      res.on('end', () => {
+        try {
+          const response = JSON.parse(data);
+          if (response.prices && Array.isArray(response.prices)) {
+            // Extract just the price values (response.prices is array of [timestamp, price])
+            const prices = response.prices.map(p => p[1]);
+            resolve(prices);
+          } else {
+            console.error('Invalid historical data from CoinGecko API');
+            reject(new Error('Invalid historical data from CoinGecko API'));
+          }
+        } catch (error) {
+          console.error('Error parsing historical data:', error.message);
           reject(error);
         }
       });
@@ -83,21 +134,32 @@ async function getBitcoinPrice() {
     console.log('Returning cached Bitcoin price');
     return {
       price: priceCache.price,
-      change24h: priceCache.change24h
+      change24h: priceCache.change24h,
+      historicalPrices: priceCache.historicalPrices
     };
   }
 
-  // Fetch fresh price
+  // Fetch fresh price and historical data
   try {
-    console.log('Fetching fresh Bitcoin price...');
-    const data = await fetchBitcoinPrice();
+    console.log('Fetching fresh Bitcoin price and historical data...');
+    const [priceData, historicalPrices] = await Promise.all([
+      fetchBitcoinPrice(),
+      fetchHistoricalPrices()
+    ]);
+
     priceCache = {
-      price: data.price,
-      change24h: data.change24h,
+      price: priceData.price,
+      change24h: priceData.change24h,
+      historicalPrices: historicalPrices,
       lastUpdated: now
     };
-    console.log(`Bitcoin price: $${data.price.toLocaleString()}`);
-    return data;
+    console.log(`Bitcoin price: $${priceData.price.toLocaleString()}`);
+    console.log(`Historical data points: ${historicalPrices.length}`);
+    return {
+      price: priceData.price,
+      change24h: priceData.change24h,
+      historicalPrices: historicalPrices
+    };
   } catch (error) {
     console.error('Error fetching Bitcoin price:', error);
     // Return cached price if available, even if stale
@@ -105,15 +167,50 @@ async function getBitcoinPrice() {
       console.log('Returning stale cached price due to error');
       return {
         price: priceCache.price,
-        change24h: priceCache.change24h
+        change24h: priceCache.change24h,
+        historicalPrices: priceCache.historicalPrices || []
       };
     }
     // Return placeholder if no cache available
     return {
       price: 0,
-      change24h: 0
+      change24h: 0,
+      historicalPrices: []
     };
   }
+}
+
+// Generate simple SVG line chart for e-ink display
+function generatePriceChart(prices, width = 600, height = 120) {
+  if (!prices || prices.length === 0) {
+    return '';
+  }
+
+  const minPrice = Math.min(...prices);
+  const maxPrice = Math.max(...prices);
+  const priceRange = maxPrice - minPrice;
+
+  if (priceRange === 0) {
+    return '';
+  }
+
+  // Create points for the line chart
+  const points = prices.map((price, index) => {
+    const x = (index / (prices.length - 1)) * width;
+    const y = height - ((price - minPrice) / priceRange) * height;
+    return `${x.toFixed(2)},${y.toFixed(2)}`;
+  }).join(' ');
+
+  return `
+    <svg width="${width}" height="${height}" style="margin: 20px auto; display: block;">
+      <polyline
+        points="${points}"
+        fill="none"
+        stroke="black"
+        stroke-width="2"
+      />
+    </svg>
+  `.trim();
 }
 
 // Format price with commas
@@ -338,13 +435,13 @@ app.post('/markup', async (req, res) => {
   const { user_uuid } = req.body;
 
   try {
-    // Get current Bitcoin price
-    const { price, change24h } = await getBitcoinPrice();
+    // Get current Bitcoin price and historical data
+    const { price, change24h, historicalPrices } = await getBitcoinPrice();
 
     // Generate markup for all layouts
     const response = {
-      markup: generateFullMarkup(price, change24h),
-      markup_half_vertical: generateHalfVerticalMarkup(price, change24h),
+      markup: generateFullMarkup(price, change24h, historicalPrices),
+      markup_half_vertical: generateHalfVerticalMarkup(price, change24h, historicalPrices),
       markup_half_horizontal: generateHalfHorizontalMarkup(price, change24h),
       markup_quadrant: generateQuadrantMarkup(price),
       shared: ""
@@ -358,10 +455,11 @@ app.post('/markup', async (req, res) => {
 });
 
 // Full screen layout - Huge Bitcoin symbol and price
-function generateFullMarkup(price, change24h) {
+function generateFullMarkup(price, change24h, historicalPrices) {
   const formattedPrice = formatPrice(price);
   const changeColor = change24h >= 0 ? '#16A34A' : '#DC2626';
   const changePrefix = change24h >= 0 ? '+' : '';
+  const chart = generatePriceChart(historicalPrices, 600, 100);
 
   return `
     <div class="view view--full">
@@ -370,14 +468,18 @@ function generateFullMarkup(price, change24h) {
           <div class="title">Bitcoin Price</div>
         </div>
         <div class="markdown" style="display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100%; text-align: center;">
-          <div style="font-size: 160px; font-weight: 700; line-height: 1; margin-bottom: 20px;">
+          <div style="font-size: 140px; font-weight: 700; line-height: 1; margin-bottom: 15px;">
             ₿
           </div>
-          <div style="font-size: 72px; font-weight: 700; margin-bottom: 10px;">
+          <div style="font-size: 64px; font-weight: 700; margin-bottom: 8px;">
             $${formattedPrice}
           </div>
-          <div style="font-size: 28px; font-weight: 400; color: ${changeColor};">
+          <div style="font-size: 24px; font-weight: 400; color: ${changeColor}; margin-bottom: 15px;">
             ${changePrefix}${change24h.toFixed(2)}% (24h)
+          </div>
+          ${chart}
+          <div style="font-size: 16px; font-weight: 300; margin-top: 10px; opacity: 0.7;">
+            24h Price Chart
           </div>
         </div>
       </div>
@@ -386,10 +488,11 @@ function generateFullMarkup(price, change24h) {
 }
 
 // Half vertical layout
-function generateHalfVerticalMarkup(price, change24h) {
+function generateHalfVerticalMarkup(price, change24h, historicalPrices) {
   const formattedPrice = formatPrice(price);
   const changeColor = change24h >= 0 ? '#16A34A' : '#DC2626';
   const changePrefix = change24h >= 0 ? '+' : '';
+  const chart = generatePriceChart(historicalPrices, 300, 80);
 
   return `
     <div class="view view--half_vertical">
@@ -398,15 +501,16 @@ function generateHalfVerticalMarkup(price, change24h) {
           <div class="title">Bitcoin</div>
         </div>
         <div class="markdown" style="display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100%; text-align: center;">
-          <div style="font-size: 100px; font-weight: 700; line-height: 1; margin-bottom: 15px;">
+          <div style="font-size: 80px; font-weight: 700; line-height: 1; margin-bottom: 10px;">
             ₿
           </div>
-          <div style="font-size: 40px; font-weight: 700; margin-bottom: 8px;">
+          <div style="font-size: 36px; font-weight: 700; margin-bottom: 6px;">
             $${formattedPrice}
           </div>
-          <div style="font-size: 20px; font-weight: 400; color: ${changeColor};">
+          <div style="font-size: 18px; font-weight: 400; color: ${changeColor}; margin-bottom: 10px;">
             ${changePrefix}${change24h.toFixed(2)}%
           </div>
+          ${chart}
         </div>
       </div>
     </div>
