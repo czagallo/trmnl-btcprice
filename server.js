@@ -599,7 +599,7 @@ function generateHalfVerticalMarkup(price, change24h, historicalPrices, chartLab
   const formattedPrice = formatPrice(price);
   const changeColor = change24h >= 0 ? '#16A34A' : '#DC2626';
   const changePrefix = change24h >= 0 ? '+' : '';
-  const chart = generatePriceChart(historicalPrices, 300, 80);
+  const chart = generatePriceChart(historicalPrices, 260, 80);
 
   return `
     <div class="view view--half_vertical">
@@ -607,7 +607,7 @@ function generateHalfVerticalMarkup(price, change24h, historicalPrices, chartLab
         <div class="title_bar">
           <div class="title">Bitcoin</div>
         </div>
-        <div class="markdown" style="display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100%; text-align: center;">
+        <div class="markdown" style="display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100%; text-align: center; padding: 0 15px; overflow: hidden;">
           <div style="font-size: 80px; font-weight: 700; line-height: 1; margin-bottom: 10px;">
             ₿
           </div>
@@ -615,7 +615,7 @@ function generateHalfVerticalMarkup(price, change24h, historicalPrices, chartLab
             $${formattedPrice}
           </div>
           <div style="font-size: 18px; font-weight: 400; color: ${changeColor}; margin-bottom: 10px;">
-            ${changePrefix}${change24h.toFixed(2)}%
+            ${changePrefix}${change24h.toFixed(2)}% (24h)
           </div>
           ${chart}
         </div>
@@ -645,7 +645,7 @@ function generateHalfHorizontalMarkup(price, change24h) {
               $${formattedPrice}
             </div>
             <div style="font-size: 20px; font-weight: 400; color: ${changeColor};">
-              ${changePrefix}${change24h.toFixed(2)}%
+              ${changePrefix}${change24h.toFixed(2)}% (24h)
             </div>
           </div>
         </div>
