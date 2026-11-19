@@ -231,7 +231,7 @@ function formatPrice(price) {
 // Step 1: Installation URL - TRMNL sends code and callback URL
 app.get('/install', async (req, res) => {
   console.log('Install request received:');
-  console.log('Query params:', req.query);
+  console.log('Query params:', Object.keys(req.query).join(', ') || '(none)');
 
   // TRMNL sends 'code' (OAuth authorization code) not 'token'
   const { code, installation_callback_url } = req.query;
@@ -255,7 +255,7 @@ app.get('/install', async (req, res) => {
     console.log('Access token received successfully');
 
     // Step 3: Redirect user back to TRMNL
-    console.log('Redirecting to:', installation_callback_url);
+    console.log('Redirecting to:', installation_callback_url.split('?')[0]);
     res.redirect(302, installation_callback_url);
   } catch (error) {
     console.error('Installation error:', error);
@@ -293,12 +293,11 @@ function exchangeCodeForAccess(code) {
 
       res.on('end', () => {
         try {
-          console.log('OAuth response:', data);
           const response = JSON.parse(data);
           if (response.access_token) {
             resolve(response.access_token);
           } else {
-            reject(new Error(`No access_token in response: ${data}`));
+            reject(new Error(`No access_token in response (keys: ${Object.keys(response).join(', ') || 'none'})`));
           }
         } catch (error) {
           reject(error);
@@ -318,7 +317,6 @@ function exchangeCodeForAccess(code) {
 // Installation success webhook
 app.post('/webhooks/install-success', (req, res) => {
   console.log('Success webhook received!');
-  console.log('Body:', JSON.stringify(req.body, null, 2));
 
   const user = req.body.user;
   if (!user) {
@@ -345,7 +343,7 @@ app.post('/webhooks/install-success', (req, res) => {
 
 // Uninstallation webhook
 app.post('/webhooks/uninstall', (req, res) => {
-  console.log('Uninstall webhook received:', JSON.stringify(req.body, null, 2));
+  console.log('Uninstall webhook received');
 
   const user_uuid = req.body.user?.uuid || req.body.uuid;
 
