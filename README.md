@@ -87,9 +87,15 @@ Required variables in `.env`:
 - `PORT` - Server port (default: 3000)
 - `BASE_URL` - Your plugin's public URL
 
+## Deployment
+
+Pushes to `main` are tested (`npm test` starts the server and checks `/health`) and scanned for vulnerable dependencies and committed secrets (Trivy), then
+deployed by GitHub Actions (`.github/workflows/deploy.yml`), which runs `deployment/deploy.sh` on the server. The
+server connection comes from repository secrets.
+
 ## Support
 
-For issues or questions, please open an issue on the repository.
+For issues or questions, please open an issue on [GitHub](https://github.com/czagallo/trmnl-btcprice/issues).
 
 ## License
 

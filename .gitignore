@@ -4,3 +4,6 @@ node_modules/
 *.log
 CLAUDE.md
 .claude/
+secrets/
+deployment/private/
+smoke-test.log
