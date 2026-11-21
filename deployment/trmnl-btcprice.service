@@ -9,6 +9,9 @@ Group=antfarm
 WorkingDirectory=/home/antfarm/deployments/trmnl-btcprice
 Environment="NODE_ENV=production"
 EnvironmentFile=/home/antfarm/deployments/trmnl-btcprice/.env
+# Per-user chart settings (data/connections.json). deploy.sh creates the directory (mode 700) before restarting.
+# Only takes effect together with ProtectSystem=strict/full; the leading "-" keeps a missing dir from blocking start.
+ReadWritePaths=-/home/antfarm/deployments/trmnl-btcprice/data
 
 # Use kill_port script to ensure port 3002 is free
 ExecStartPre=/usr/local/bin/kill_port.sh 3002

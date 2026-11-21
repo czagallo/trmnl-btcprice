@@ -1,684 +1,194 @@
 require('dotenv').config();
+const path = require('path');
 const express = require('express');
-const https = require('https');
-const app = express();
-const PORT = process.env.PORT || 3000;
+const { createBtc, normalizeInterval, withTimeout, INTERVALS, DEFAULT_INTERVAL } = require('./src/btc');
+const { renderAll, esc, intervalLabel, coinSvg } = require('./src/markup');
+const { createStore } = require('./src/store');
 
-// Load environment variables
+const PORT = Number(process.env.PORT) || 3002;
 const CLIENT_ID = process.env.TRMNL_CLIENT_ID;
 const CLIENT_SECRET = process.env.TRMNL_CLIENT_SECRET;
-const BASE_URL = process.env.BASE_URL || `http://localhost:${PORT}`;
+const BASE_URL = (process.env.BASE_URL || `http://localhost:${PORT}`).replace(/\/$/, '');
+const TRMNL_OAUTH_URL = 'https://usetrmnl.com/oauth/token';
+const MARKUP_BUDGET_MS = 7000; // TRMNL gives /markup 10 s
+const UUID_RE = /^[A-Za-z0-9-]{1,64}$/;
+const SETTING_ID_RE = /^[0-9]{1,20}$/;
 
-// In-memory storage for plugin connections
-// In production, use a database (PostgreSQL, MongoDB, etc.)
-const pluginConnections = new Map();
+function createApp({ store = createStore(), btc = createBtc() } = {}) {
+  const app = express();
+  app.disable('x-powered-by');
+  // TRMNL posts the markup request form-encoded with nested keys (trmnl[user][...]); JSON is for local testing.
+  app.use(express.urlencoded({ extended: true, limit: '100kb' }));
+  app.use(express.json({ limit: '100kb' }));
 
-// Cache for Bitcoin price (avoid hitting API too frequently)
-// Store cache per interval (days)
-const priceCache = new Map();
-const CACHE_DURATION = 2 * 60 * 1000; // 2 minutes
-
-// Middleware
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
-
-// ============================================================================
-// BITCOIN PRICE FUNCTIONS
-// ============================================================================
-
-// Fetch Bitcoin price from CoinGecko API
-function fetchBitcoinPrice() {
-  return new Promise((resolve, reject) => {
-    const options = {
-      hostname: 'api.coingecko.com',
-      port: 443,
-      path: '/api/v3/simple/price?ids=bitcoin&vs_currencies=usd&include_24hr_change=true',
-      method: 'GET',
-      headers: {
-        'Accept': 'application/json',
-        'User-Agent': 'TRMNL-Bitcoin-Price-Plugin/1.0'
-      }
-    };
-
-    const req = https.request(options, (res) => {
-      let data = '';
-
-      res.on('data', (chunk) => {
-        data += chunk;
-      });
-
-      res.on('end', () => {
-        try {
-          const response = JSON.parse(data);
-          if (response.bitcoin && response.bitcoin.usd) {
-            resolve({
-              price: response.bitcoin.usd,
-              change24h: response.bitcoin.usd_24h_change || 0
-            });
-          } else {
-            console.error('Invalid response from CoinGecko API');
-            reject(new Error('Invalid response from CoinGecko API'));
-          }
-        } catch (error) {
-          console.error('Error parsing CoinGecko response:', error.message);
-          reject(error);
-        }
-      });
-    });
-
-    req.on('error', (error) => {
-      reject(error);
-    });
-
-    req.end();
+  app.get('/icon.svg', (req, res) => {
+    res.set('Cache-Control', 'public, max-age=86400');
+    res.sendFile(path.join(__dirname, 'icon.svg'));
   });
-}
 
-// Fetch historical Bitcoin prices from CoinGecko API
-function fetchHistoricalPrices(days = 30) {
-  return new Promise((resolve, reject) => {
-    // For 1 day, use hourly interval; otherwise use daily
-    const interval = days === 1 ? 'hourly' : 'daily';
-
-    const options = {
-      hostname: 'api.coingecko.com',
-      port: 443,
-      path: `/api/v3/coins/bitcoin/market_chart?vs_currency=usd&days=${days}&interval=${interval}`,
-      method: 'GET',
-      headers: {
-        'Accept': 'application/json',
-        'User-Agent': 'TRMNL-Bitcoin-Price-Plugin/1.0'
-      }
-    };
-
-    const req = https.request(options, (res) => {
-      let data = '';
-
-      res.on('data', (chunk) => {
-        data += chunk;
-      });
-
-      res.on('end', () => {
-        try {
-          const response = JSON.parse(data);
-          if (response.prices && Array.isArray(response.prices)) {
-            // Extract just the price values (response.prices is array of [timestamp, price])
-            const prices = response.prices.map(p => p[1]);
-            resolve(prices);
-          } else {
-            console.error('Invalid historical data from CoinGecko API');
-            reject(new Error('Invalid historical data from CoinGecko API'));
-          }
-        } catch (error) {
-          console.error('Error parsing historical data:', error.message);
-          reject(error);
-        }
-      });
-    });
-
-    req.on('error', (error) => {
-      reject(error);
-    });
-
-    req.end();
+  // Black-and-white coin for the e-ink title bar (icon.svg is the coloured marketplace icon).
+  const titleIcon = coinSvg().replace('<svg ', '<svg width="100" height="100" ').replace(/currentColor/g, 'black');
+  app.get('/title-icon.svg', (req, res) => {
+    res.set('Cache-Control', 'public, max-age=86400');
+    res.type('image/svg+xml').send(titleIcon);
   });
-}
 
-// Get Bitcoin price with caching
-async function getBitcoinPrice(days = 30) {
-  const now = Date.now();
-  const cacheKey = `days_${days}`;
+  // -------------------------------------------------------------------------
+  // Installation (OAuth)
+  // -------------------------------------------------------------------------
 
-  // Return cached price if still valid
-  const cached = priceCache.get(cacheKey);
-  if (cached && cached.lastUpdated && (now - cached.lastUpdated) < CACHE_DURATION) {
-    console.log(`Returning cached Bitcoin price (${days} days)`);
-    return {
-      price: cached.price,
-      change24h: cached.change24h,
-      historicalPrices: cached.historicalPrices
-    };
-  }
-
-  // Fetch fresh price and historical data
-  try {
-    console.log(`Fetching fresh Bitcoin price and ${days}-day historical data...`);
-    const [priceData, historicalPrices] = await Promise.all([
-      fetchBitcoinPrice(),
-      fetchHistoricalPrices(days)
-    ]);
-
-    const newCache = {
-      price: priceData.price,
-      change24h: priceData.change24h,
-      historicalPrices: historicalPrices,
-      lastUpdated: now
-    };
-
-    priceCache.set(cacheKey, newCache);
-    console.log(`Bitcoin price: $${priceData.price.toLocaleString()}`);
-    console.log(`Historical data points: ${historicalPrices.length}`);
-    return {
-      price: priceData.price,
-      change24h: priceData.change24h,
-      historicalPrices: historicalPrices
-    };
-  } catch (error) {
-    console.error('Error fetching Bitcoin price:', error);
-    // Return cached price if available, even if stale
-    if (cached) {
-      console.log('Returning stale cached price due to error');
-      return {
-        price: cached.price,
-        change24h: cached.change24h,
-        historicalPrices: cached.historicalPrices || []
-      };
+  app.get('/install', async (req, res) => {
+    const { code, installation_callback_url: callback } = req.query;
+    if (!code || !callback || typeof code !== 'string' || typeof callback !== 'string') {
+      return res.status(400).json({ error: 'Missing code or installation_callback_url' });
     }
-    // Return placeholder if no cache available
-    return {
-      price: 0,
-      change24h: 0,
-      historicalPrices: []
-    };
-  }
-}
+    if (!CLIENT_ID || !CLIENT_SECRET) return res.status(500).json({ error: 'Plugin credentials not configured' });
 
-// Generate simple SVG line chart for e-ink display
-function generatePriceChart(prices, width = 600, height = 120) {
-  if (!prices || prices.length === 0) {
-    return '';
-  }
-
-  const minPrice = Math.min(...prices);
-  const maxPrice = Math.max(...prices);
-  const priceRange = maxPrice - minPrice;
-
-  if (priceRange === 0) {
-    return '';
-  }
-
-  // Create points for the line chart
-  const points = prices.map((price, index) => {
-    const x = (index / (prices.length - 1)) * width;
-    const y = height - ((price - minPrice) / priceRange) * height;
-    return `${x.toFixed(2)},${y.toFixed(2)}`;
-  }).join(' ');
-
-  return `
-    <svg width="${width}" height="${height}" style="margin: 20px auto; display: block;">
-      <polyline
-        points="${points}"
-        fill="none"
-        stroke="black"
-        stroke-width="2"
-      />
-    </svg>
-  `.trim();
-}
-
-// Format price with commas
-function formatPrice(price) {
-  return price.toLocaleString('en-US', {
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2
+    try {
+      const r = await fetch(TRMNL_OAUTH_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ client_id: CLIENT_ID, client_secret: CLIENT_SECRET, code, grant_type: 'authorization_code' }),
+        signal: AbortSignal.timeout(8000),
+      });
+      const body = await r.json().catch(() => ({}));
+      if (!r.ok || !body.access_token) throw new Error(`token exchange failed (HTTP ${r.status})`);
+      console.log('Install: token exchange ok');
+      res.redirect(302, callback);
+    } catch (err) {
+      console.error('Install failed:', err.message);
+      res.status(500).json({ error: 'Installation failed' });
+    }
   });
-}
 
-// ============================================================================
-// INSTALLATION FLOW ENDPOINTS
-// ============================================================================
+  // Only the plugin_setting_id (for the "Back to TRMNL" link) is kept; no user data, no access token.
+  app.post('/webhooks/install-success', (req, res) => {
+    const user = req.body?.user;
+    const uuid = String(user?.uuid || '');
+    if (!UUID_RE.test(uuid)) return res.status(400).json({ error: 'No user data' });
+    const sid = String(user.plugin_setting_id ?? '');
+    store.update(uuid, { plugin_setting_id: SETTING_ID_RE.test(sid) ? sid : null });
+    console.log('Install success');
+    res.json({ success: true });
+  });
 
-// Step 1: Installation URL - TRMNL sends code and callback URL
-app.get('/install', async (req, res) => {
-  console.log('Install request received:');
-  console.log('Query params:', Object.keys(req.query).join(', ') || '(none)');
+  app.post('/webhooks/uninstall', (req, res) => {
+    const uuid = String(req.body?.user?.uuid || req.body?.uuid || '');
+    if (UUID_RE.test(uuid)) store.delete(uuid);
+    console.log('Uninstall');
+    res.json({ success: true });
+  });
 
-  // TRMNL sends 'code' (OAuth authorization code) not 'token'
-  const { code, installation_callback_url } = req.query;
+  // -------------------------------------------------------------------------
+  // Settings page
+  // -------------------------------------------------------------------------
 
-  if (!code || !installation_callback_url) {
-    console.error('Missing required parameters');
-    return res.status(400).json({
-      error: 'Missing code or installation_callback_url',
-      received_query: req.query
-    });
+  function managePage(uuid, conn, notice) {
+    const current = normalizeInterval(conn?.chartInterval) ?? DEFAULT_INTERVAL;
+    const sid = conn?.plugin_setting_id && SETTING_ID_RE.test(String(conn.plugin_setting_id)) ? String(conn.plugin_setting_id) : null;
+    const back = sid ? `https://usetrmnl.com/plugin_settings/${encodeURIComponent(sid)}/edit?force_refresh=true` : 'https://usetrmnl.com';
+    const options = INTERVALS.map(
+      (d) => `<option value="${d}"${d === current ? ' selected' : ''}>${esc(intervalLabel(d))}${d === 1 ? ' (hourly)' : ' (daily)'}</option>`,
+    ).join('');
+
+    return `<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Bitcoin Price</title>
+<style>
+body{font-family:system-ui,sans-serif;max-width:600px;margin:40px auto;padding:0 16px;line-height:1.5;color:#1a1a1a}
+label{display:block;font-weight:600;margin-top:18px}
+select{width:100%;box-sizing:border-box;padding:9px;font:inherit;border:1px solid #bbb;border-radius:6px;margin-top:4px}
+small{color:#555;display:block;margin-top:4px}
+button,.btn{display:inline-block;margin-top:24px;margin-right:8px;padding:10px 18px;font:inherit;border-radius:6px;border:1px solid #1a1a1a;background:#1a1a1a;color:#fff;text-decoration:none;cursor:pointer}
+.btn{background:#fff;color:#1a1a1a}
+.notice{padding:10px 14px;border-radius:6px;margin:16px 0;background:#eef6ee;border:1px solid #9c9}
+.notice.err{background:#fbeeee;border-color:#d99}
+</style></head>
+<body>
+<h1>Bitcoin Price</h1>
+<p>The current Bitcoin price in USD with its 24-hour change and a price chart. Data: CoinGecko.</p>
+${notice ? `<div class="notice${notice.ok ? '' : ' err'}">${esc(notice.text)}</div>` : ''}
+<form method="POST" action="/manage/save">
+<input type="hidden" name="uuid" value="${esc(uuid)}">
+<label for="interval">Chart range</label>
+<select name="interval" id="interval">${options}</select>
+<small>The time range of the price chart on your device.</small>
+<button type="submit">Save</button>
+<a class="btn" href="${esc(back)}">Back to TRMNL</a>
+</form>
+</body></html>`;
   }
 
-  if (!CLIENT_ID || !CLIENT_SECRET) {
-    return res.status(500).json({ error: 'Plugin credentials not configured' });
-  }
+  app.get('/manage', (req, res) => {
+    const uuid = String(req.query.uuid || '');
+    if (!UUID_RE.test(uuid)) return res.status(400).send('Missing or invalid uuid');
+    const notice = req.query.saved === 'true' ? { ok: true, text: 'Settings saved.' } : null;
+    res.type('html').send(managePage(uuid, store.get(uuid), notice));
+  });
 
-  try {
-    // Step 2: Exchange authorization code for access_token
-    console.log('Exchanging authorization code for access token...');
-    const accessToken = await exchangeCodeForAccess(code);
-    console.log('Access token received successfully');
+  // Works for any valid uuid, also one whose install webhook we never saw (for example before persistence existed).
+  app.post('/manage/save', (req, res) => {
+    const uuid = String(req.body?.uuid || '');
+    if (!UUID_RE.test(uuid)) return res.status(400).send('Missing or invalid uuid');
+    const interval = normalizeInterval(req.body?.interval);
+    if (interval === null) {
+      return res.status(400).type('html').send(managePage(uuid, store.get(uuid), { ok: false, text: 'Please choose one of the offered chart ranges.' }));
+    }
+    if (!store.update(uuid, { chartInterval: interval })) {
+      return res.status(500).type('html').send(managePage(uuid, store.get(uuid), { ok: false, text: 'Could not save your settings. Please try again later.' }));
+    }
+    btc.getHistory(interval).catch(() => {}); // warm the chart for the first screen
+    res.redirect(303, `/manage?uuid=${encodeURIComponent(uuid)}&saved=true`);
+  });
 
-    // Step 3: Redirect user back to TRMNL
-    console.log('Redirecting to:', installation_callback_url.split('?')[0]);
-    res.redirect(302, installation_callback_url);
-  } catch (error) {
-    console.error('Installation error:', error);
-    res.status(500).json({ error: 'Installation failed', details: error.message });
-  }
-});
+  // -------------------------------------------------------------------------
+  // Screen generation
+  // -------------------------------------------------------------------------
 
-// Helper function to exchange authorization code for access_token
-function exchangeCodeForAccess(code) {
-  return new Promise((resolve, reject) => {
-    const postData = JSON.stringify({
-      client_id: CLIENT_ID,
-      client_secret: CLIENT_SECRET,
-      code: code,
-      grant_type: 'authorization_code'
-    });
-
-    const options = {
-      hostname: 'usetrmnl.com',
-      port: 443,
-      path: '/oauth/token',
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Content-Length': Buffer.byteLength(postData)
+  // TRMNL metadata arrives either as nested form keys (trmnl[user][...]) or as one JSON string in the "trmnl" field.
+  function trmnlMeta(raw) {
+    if (raw && typeof raw === 'object') return raw;
+    if (typeof raw === 'string' && raw.length < 50000) {
+      try {
+        const parsed = JSON.parse(raw);
+        if (parsed && typeof parsed === 'object') return parsed;
+      } catch {
+        /* not JSON: ignore */
       }
-    };
-
-    const req = https.request(options, (res) => {
-      let data = '';
-
-      res.on('data', (chunk) => {
-        data += chunk;
-      });
-
-      res.on('end', () => {
-        try {
-          const response = JSON.parse(data);
-          if (response.access_token) {
-            resolve(response.access_token);
-          } else {
-            reject(new Error(`No access_token in response (keys: ${Object.keys(response).join(', ') || 'none'})`));
-          }
-        } catch (error) {
-          reject(error);
-        }
-      });
-    });
-
-    req.on('error', (error) => {
-      reject(error);
-    });
-
-    req.write(postData);
-    req.end();
-  });
-}
-
-// Installation success webhook
-app.post('/webhooks/install-success', (req, res) => {
-  console.log('Success webhook received!');
-
-  const user = req.body.user;
-  if (!user) {
-    console.error('No user data in webhook');
-    return res.status(400).json({ error: 'No user data' });
+    }
+    return {};
   }
 
-  const user_uuid = user.uuid;
-  const plugin_setting_id = user.plugin_setting_id;
-  const access_token = req.headers.authorization?.replace('Bearer ', '');
-
-  console.log('Installation successful for user:', user_uuid);
-  console.log('Plugin setting ID:', plugin_setting_id);
-
-  pluginConnections.set(user_uuid, {
-    plugin_setting_id,
-    access_token,
-    installed_at: new Date().toISOString(),
-    user_data: user
+  app.post('/markup', async (req, res) => {
+    const trmnl = trmnlMeta(req.body?.trmnl);
+    const uuid = String(req.body?.user_uuid || trmnl.user?.uuid || '');
+    const conn = UUID_RE.test(uuid) ? store.get(uuid) : null;
+    const days = normalizeInterval(conn?.chartInterval) ?? DEFAULT_INTERVAL;
+    const ctx = { baseUrl: BASE_URL, instance: trmnl.plugin_settings?.instance_name, timeZone: trmnl.user?.time_zone_iana };
+    let data = null;
+    try {
+      data = await withTimeout(btc.getData(days), MARKUP_BUDGET_MS);
+    } catch (err) {
+      console.error('Markup data failed:', err.message);
+    }
+    res.json(renderAll(data, ctx));
   });
 
-  res.status(200).json({ success: true });
-});
+  app.get('/health', (req, res) => {
+    const age = btc.cacheAgeMs();
+    res.json({ status: 'ok', users: store.size(), cacheAgeSeconds: age === null ? null : Math.round(age / 1000) });
+  });
 
-// Uninstallation webhook
-app.post('/webhooks/uninstall', (req, res) => {
-  console.log('Uninstall webhook received');
-
-  const user_uuid = req.body.user?.uuid || req.body.uuid;
-
-  console.log('Uninstalling plugin for user:', user_uuid);
-
-  if (user_uuid) {
-    pluginConnections.delete(user_uuid);
-  }
-
-  res.status(200).json({ success: true });
-});
-
-// Plugin management URL
-app.get('/manage', (req, res) => {
-  const { uuid } = req.query;
-
-  if (!uuid) {
-    return res.status(400).send('Missing uuid parameter');
-  }
-
-  const connection = pluginConnections.get(uuid);
-  const currentInterval = connection?.chartInterval || '30';
-  const saved = req.query.saved === 'true';
-
-  res.send(`
-    <!DOCTYPE html>
-    <html>
-    <head>
-      <title>Bitcoin Price Plugin Settings</title>
-      <style>
-        body {
-          font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-          max-width: 600px;
-          margin: 50px auto;
-          padding: 20px;
-          background: #f5f5f5;
-        }
-        .card {
-          background: white;
-          border-radius: 8px;
-          padding: 30px;
-          box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-        }
-        h1 { color: #333; margin-top: 0; }
-        h2 { color: #333; margin-top: 30px; font-size: 20px; }
-        p { color: #666; line-height: 1.6; }
-        label { display: block; margin-bottom: 8px; font-weight: 500; color: #333; }
-        select {
-          width: 100%;
-          padding: 10px;
-          border: 1px solid #ddd;
-          border-radius: 4px;
-          font-size: 16px;
-          margin-bottom: 15px;
-        }
-        .btn {
-          display: inline-block;
-          padding: 12px 24px;
-          background: #F7931A;
-          color: white;
-          text-decoration: none;
-          border-radius: 6px;
-          border: none;
-          cursor: pointer;
-          font-size: 16px;
-          margin-right: 10px;
-        }
-        .btn:hover { background: #E28212; }
-        .btn-secondary {
-          background: #6B7280;
-        }
-        .btn-secondary:hover {
-          background: #4B5563;
-        }
-        .info {
-          background: #FFF4E6;
-          padding: 15px;
-          border-radius: 6px;
-          margin: 20px 0;
-        }
-        .success {
-          background: #D1FAE5;
-          color: #065F46;
-          padding: 12px;
-          border-radius: 6px;
-          margin-bottom: 20px;
-        }
-        .interval-desc {
-          font-size: 14px;
-          color: #666;
-          margin-top: 8px;
-        }
-      </style>
-    </head>
-    <body>
-      <div class="card">
-        <h1>₿ Bitcoin Price Plugin</h1>
-
-        ${saved ? '<div class="success">✓ Settings saved successfully!</div>' : ''}
-
-        <p>Configure your Bitcoin price display settings.</p>
-
-        <h2>Chart Settings</h2>
-        <form method="POST" action="/manage/save">
-          <input type="hidden" name="uuid" value="${uuid}">
-
-          <label for="interval">Price Chart Interval:</label>
-          <select name="interval" id="interval">
-            <option value="1" ${currentInterval === '1' ? 'selected' : ''}>24 Hours (Hourly)</option>
-            <option value="7" ${currentInterval === '7' ? 'selected' : ''}>7 Days (Daily)</option>
-            <option value="30" ${currentInterval === '30' ? 'selected' : ''}>30 Days (Daily)</option>
-            <option value="90" ${currentInterval === '90' ? 'selected' : ''}>90 Days (Daily)</option>
-            <option value="365" ${currentInterval === '365' ? 'selected' : ''}>1 Year (Daily)</option>
-          </select>
-          <div class="interval-desc">Choose the time range for the price chart displayed on your device.</div>
-
-          <div style="margin-top: 25px;">
-            <button type="submit" class="btn">Save Settings</button>
-            ${connection && connection.plugin_setting_id ?
-              `<a href="https://usetrmnl.com/plugin_settings/${connection.plugin_setting_id}/edit?force_refresh=true" class="btn btn-secondary">← Back to TRMNL</a>` :
-              `<a href="https://usetrmnl.com" class="btn btn-secondary">← Back to TRMNL</a>`
-            }
-          </div>
-        </form>
-      </div>
-    </body>
-    </html>
-  `);
-});
-
-// Save settings endpoint
-app.post('/manage/save', express.urlencoded({ extended: true }), (req, res) => {
-  const { uuid, interval } = req.body;
-
-  if (!uuid) {
-    return res.status(400).send('Missing uuid parameter');
-  }
-
-  const connection = pluginConnections.get(uuid);
-  if (connection) {
-    connection.chartInterval = interval;
-    pluginConnections.set(uuid, connection);
-  }
-
-  // Redirect back to manage page with success message
-  res.redirect(`/manage?uuid=${uuid}&saved=true`);
-});
-
-// ============================================================================
-// MARKUP GENERATION ENDPOINTS
-// ============================================================================
-
-// Main plugin markup endpoint
-app.post('/markup', async (req, res) => {
-  const { user_uuid } = req.body;
-
-  try {
-    // Get user's chart interval preference (default to 30 days)
-    const connection = pluginConnections.get(user_uuid);
-    const days = parseInt(connection?.chartInterval || '30');
-
-    // Get current Bitcoin price and historical data
-    const { price, change24h, historicalPrices } = await getBitcoinPrice(days);
-
-    // Get chart label based on interval
-    const chartLabel = getChartLabel(days);
-
-    // Generate markup for all layouts
-    const response = {
-      markup: generateFullMarkup(price, change24h, historicalPrices, chartLabel),
-      markup_half_vertical: generateHalfVerticalMarkup(price, change24h, historicalPrices, chartLabel),
-      markup_half_horizontal: generateHalfHorizontalMarkup(price, change24h),
-      markup_quadrant: generateQuadrantMarkup(price),
-      shared: ""
-    };
-
-    res.json(response);
-  } catch (error) {
-    console.error('Error generating markup:', error);
-    res.status(500).json({ error: 'Failed to generate markup' });
-  }
-});
-
-// Helper to get chart label based on interval
-function getChartLabel(days) {
-  if (days === 1) return '24-Hour Chart';
-  if (days === 7) return '7-Day Chart';
-  if (days === 30) return '30-Day Chart';
-  if (days === 90) return '90-Day Chart';
-  if (days === 365) return '1-Year Chart';
-  return `${days}-Day Chart`;
+  app.locals.btc = btc;
+  app.locals.store = store;
+  return app;
 }
 
-// Full screen layout - Huge Bitcoin coin on left, price and chart on right
-function generateFullMarkup(price, change24h, historicalPrices, chartLabel = '30-Day Chart') {
-  const formattedPrice = formatPrice(price);
-  const changeColor = change24h >= 0 ? '#16A34A' : '#DC2626';
-  const changePrefix = change24h >= 0 ? '+' : '';
-  const chart = generatePriceChart(historicalPrices, 400, 110);
-
-  // Bitcoin coin SVG (smaller to fit screen)
-  const bitcoinCoin = `
-    <svg width="260" height="260" viewBox="0 0 320 320" xmlns="http://www.w3.org/2000/svg">
-      <!-- Outer circle (coin edge) -->
-      <circle cx="160" cy="160" r="155" fill="none" stroke="black" stroke-width="10"/>
-
-      <!-- Inner circle (coin face) -->
-      <circle cx="160" cy="160" r="145" fill="white" stroke="black" stroke-width="3"/>
-
-      <!-- Bitcoin B symbol -->
-      <text x="160" y="220" font-family="Arial, sans-serif" font-size="180" font-weight="900" text-anchor="middle" fill="black">₿</text>
-
-      <!-- Decorative notches around edge -->
-      <circle cx="160" cy="10" r="4" fill="black"/>
-      <circle cx="160" cy="310" r="4" fill="black"/>
-      <circle cx="10" cy="160" r="4" fill="black"/>
-      <circle cx="310" cy="160" r="4" fill="black"/>
-    </svg>
-  `;
-
-  return `
-    <div class="view view--full">
-      <div class="layout">
-        <div class="markdown" style="display: flex; flex-direction: row; align-items: center; height: 100%; padding: 15px 10px;">
-          <!-- Left: Bitcoin Coin -->
-          <div style="flex: 0 0 30%; display: flex; align-items: center; justify-content: center; padding-left: 10px;">
-            ${bitcoinCoin}
-          </div>
-
-          <!-- Right: Price, Change, and Chart -->
-          <div style="flex: 1; display: flex; flex-direction: column; justify-content: center; padding-left: 20px; padding-right: 15px; max-width: 65%;">
-            <div style="font-size: 68px; font-weight: 700; margin-bottom: 8px; line-height: 1;">
-              $${formattedPrice}
-            </div>
-            <div style="font-size: 28px; font-weight: 400; color: ${changeColor}; margin-bottom: 18px;">
-              ${changePrefix}${change24h.toFixed(2)}% (24h)
-            </div>
-            ${chart}
-            <div style="font-size: 16px; font-weight: 300; margin-top: 10px; opacity: 0.7;">
-              ${chartLabel}
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
-  `.trim();
+if (require.main === module) {
+  const app = createApp();
+  app.listen(PORT, '127.0.0.1', () => console.log(`TRMNL Bitcoin Price plugin on http://127.0.0.1:${PORT}`));
+  const { btc, store } = app.locals;
+  btc.startBackgroundRefresh(() => store.all().map((c) => c.chartInterval));
 }
 
-// Half vertical layout
-function generateHalfVerticalMarkup(price, change24h, historicalPrices, chartLabel = '30-Day Chart') {
-  const formattedPrice = formatPrice(price);
-  const changeColor = change24h >= 0 ? '#16A34A' : '#DC2626';
-  const changePrefix = change24h >= 0 ? '+' : '';
-  const chart = generatePriceChart(historicalPrices, 260, 80);
-
-  return `
-    <div class="view view--half_vertical">
-      <div class="layout">
-        <div class="title_bar">
-          <div class="title">Bitcoin</div>
-        </div>
-        <div class="markdown" style="display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100%; text-align: center; padding: 0 15px; overflow: hidden;">
-          <div style="font-size: 80px; font-weight: 700; line-height: 1; margin-bottom: 10px;">
-            ₿
-          </div>
-          <div style="font-size: 36px; font-weight: 700; margin-bottom: 6px;">
-            $${formattedPrice}
-          </div>
-          <div style="font-size: 18px; font-weight: 400; color: ${changeColor}; margin-bottom: 10px;">
-            ${changePrefix}${change24h.toFixed(2)}% (24h)
-          </div>
-          ${chart}
-        </div>
-      </div>
-    </div>
-  `.trim();
-}
-
-// Half horizontal layout
-function generateHalfHorizontalMarkup(price, change24h) {
-  const formattedPrice = formatPrice(price);
-  const changeColor = change24h >= 0 ? '#16A34A' : '#DC2626';
-  const changePrefix = change24h >= 0 ? '+' : '';
-
-  return `
-    <div class="view view--half_horizontal">
-      <div class="layout">
-        <div class="title_bar">
-          <div class="title">Bitcoin Price</div>
-        </div>
-        <div class="markdown" style="display: flex; align-items: center; justify-content: center; height: 100%; text-align: center; gap: 20px;">
-          <div style="font-size: 80px; font-weight: 700; line-height: 1;">
-            ₿
-          </div>
-          <div>
-            <div style="font-size: 48px; font-weight: 700;">
-              $${formattedPrice}
-            </div>
-            <div style="font-size: 20px; font-weight: 400; color: ${changeColor};">
-              ${changePrefix}${change24h.toFixed(2)}% (24h)
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
-  `.trim();
-}
-
-// Quadrant layout
-function generateQuadrantMarkup(price) {
-  const formattedPrice = formatPrice(price);
-
-  return `
-    <div class="view view--quadrant">
-      <div class="layout">
-        <div class="markdown" style="display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100%; text-align: center;">
-          <div style="font-size: 48px; font-weight: 700; line-height: 1; margin-bottom: 8px;">
-            ₿
-          </div>
-          <div style="font-size: 18px; font-weight: 600;">
-            $${formattedPrice}
-          </div>
-        </div>
-      </div>
-    </div>
-  `.trim();
-}
-
-// Health check endpoint
-app.get('/health', (req, res) => {
-  res.json({ status: 'ok', timestamp: new Date().toISOString() });
-});
-
-// Start server
-app.listen(PORT, () => {
-  console.log(`TRMNL Bitcoin Price Plugin running on port ${PORT}`);
-  console.log(`Markup endpoint: POST http://localhost:${PORT}/markup`);
-});
+module.exports = { createApp };

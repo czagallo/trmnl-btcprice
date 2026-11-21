@@ -7,3 +7,5 @@ CLAUDE.md
 secrets/
 deployment/private/
 smoke-test.log
+data/
+preview/

@@ -23,6 +23,7 @@ main() {
 
   npm ci --omit=dev --no-audit --no-fund --loglevel=error
 
+  mkdir -p -m 700 data   # per-user chart settings (data/connections.json); gitignored, so reset/pull never touch it
   sudo -n systemctl restart "$SERVICE"
 
   port=$(grep -E '^PORT=' .env 2>/dev/null | cut -d= -f2 || true)
